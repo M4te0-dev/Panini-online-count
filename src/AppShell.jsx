@@ -235,6 +235,7 @@ export default function AppShell({ stickers, onChangeStickers, saveStatus, userE
           onBack={() => setPage("home")}
           onAddDouble={addQuickDouble}
           onRemove={removeSticker}
+          onQuickAdd={(code, name) => addOwned(code, name, false)}
           saveStatus={saveStatus}
         />
       )}
@@ -390,40 +391,47 @@ function SaveIndicator({ status }) {
    PAGE ALBUM
    ============================================================ */
 
-function AlbumPage({ stickers, onBack, onAddDouble, onRemove, saveStatus }) {
+function AlbumPage({ stickers, onBack, onAddDouble, onRemove, onQuickAdd, saveStatus }) {
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState({});
 
   const orderedGroupKeys = [...Object.keys(GROUPS), "★"];
 
-  const grouped = useMemo(() => {
+  // Construit la structure complète : TOUS les codes de la checklist,
+  // classés par groupe (ordre officiel) puis équipe (ordre officiel) puis numéro.
+  const fullStructure = useMemo(() => {
     const q = query.trim().toLowerCase();
     const result = {};
     orderedGroupKeys.forEach((g) => (result[g] = []));
 
-    Object.keys(PLAYER_DB).forEach((code) => {
-      const entry = stickers[code];
-      if (!entry || !entry.owned) return;
-      const m = code.match(/^([A-Z]{3})(\d+)$/);
-      if (!m) return;
-      const [, team, numStr] = m;
-      const num = parseInt(numStr, 10);
-      const name = PLAYER_DB[code];
-      const group = TEAM_TO_GROUP[team] || "★";
-
-      if (q) {
-        const teamFull = (TEAM_NAMES[team] || team).toLowerCase();
-        const hay = `${name} ${team} ${teamFull} ${code} ${num}`.toLowerCase();
-        if (!hay.includes(q)) return;
-      }
-
-      result[group].push({ code, team, num, name, dbl: entry.dbl || 0 });
-    });
-
     orderedGroupKeys.forEach((g) => {
-      result[g].sort((a, b) => {
-        if (a.team !== b.team) return a.team.localeCompare(b.team);
-        return a.num - b.num;
+      const teams = g === "★" ? ["FWC"] : GROUPS[g];
+      teams.forEach((team) => {
+        // tous les codes de cette équipe dans PLAYER_DB, triés par numéro
+        const codes = Object.keys(PLAYER_DB)
+          .filter((c) => c.startsWith(team) && /^[A-Z]{3}\d+$/.test(c))
+          .sort((a, b) => {
+            const na = parseInt(a.replace(team, ""), 10);
+            const nb = parseInt(b.replace(team, ""), 10);
+            return na - nb;
+          });
+
+        codes.forEach((code) => {
+          const numStr = code.replace(team, "");
+          const num = parseInt(numStr, 10);
+          const name = PLAYER_DB[code];
+          const entry = stickers[code];
+          const owned = !!entry?.owned;
+          const dbl = entry?.dbl || 0;
+
+          if (q) {
+            const teamFull = (TEAM_NAMES[team] || team).toLowerCase();
+            const hay = `${name} ${team} ${teamFull} ${code} ${num}`.toLowerCase();
+            if (!hay.includes(q)) return;
+          }
+
+          result[g].push({ code, team, num, name, owned, dbl });
+        });
       });
     });
 
@@ -433,13 +441,15 @@ function AlbumPage({ stickers, onBack, onAddDouble, onRemove, saveStatus }) {
   const toggleGroup = (g) =>
     setCollapsed((prev) => ({ ...prev, [g]: !prev[g] }));
 
-  const nonEmptyGroups = orderedGroupKeys.filter((g) => grouped[g].length > 0);
+  const visibleGroups = orderedGroupKeys.filter((g) => fullStructure[g].length > 0);
+  const ownedCount = Object.values(stickers).filter((s) => s?.owned).length;
+  const totalCount = Object.keys(PLAYER_DB).length;
 
   return (
     <div style={styles.pageWrap}>
       <InnerHeader
         title="Mon Album"
-        subtitle={`${Object.values(stickers).filter((s) => s?.owned).length} vignettes collectées`}
+        subtitle={`${ownedCount} / ${totalCount} vignettes collectées`}
         onBack={onBack}
         saveStatus={saveStatus}
       />
@@ -455,17 +465,27 @@ function AlbumPage({ stickers, onBack, onAddDouble, onRemove, saveStatus }) {
           />
         </div>
 
-        {nonEmptyGroups.length === 0 && (
+        {visibleGroups.length === 0 && (
           <EmptyState
-            title="Album vide pour l'instant"
-            desc="Ajoute tes premières vignettes depuis la page « Ajouter »."
+            title="Aucun résultat"
+            desc="Essaie une autre recherche."
           />
         )}
 
-        {nonEmptyGroups.map((g) => {
-          const items = grouped[g];
+        {visibleGroups.map((g) => {
+          const items = fullStructure[g];
           const isCollapsed = !!collapsed[g];
           const color = GROUP_COLORS[g] || "#FFD700";
+          const ownedInGroup = items.filter((it) => it.owned).length;
+
+          // sous-groupement par équipe pour affichage avec sous-titres
+          const byTeam = {};
+          items.forEach((it) => {
+            if (!byTeam[it.team]) byTeam[it.team] = [];
+            byTeam[it.team].push(it);
+          });
+          const teamOrder = g === "★" ? ["FWC"] : GROUPS[g];
+
           return (
             <div key={g} style={styles.groupBlock}>
               <button
@@ -473,23 +493,43 @@ function AlbumPage({ stickers, onBack, onAddDouble, onRemove, saveStatus }) {
                 onClick={() => toggleGroup(g)}
               >
                 <span style={{ ...styles.groupBadge, background: color }}>
-                  {g === "★" ? "★" : `GROUPE ${g}`}
+                  {g === "★" ? "★ SPÉCIALES FIFA" : `GROUPE ${g}`}
                 </span>
-                <span style={styles.groupCount}>{items.length} vignette{items.length > 1 ? "s" : ""}</span>
+                <span style={styles.groupCount}>
+                  {ownedInGroup} / {items.length}
+                </span>
                 <IconChevron open={!isCollapsed} />
               </button>
 
               {!isCollapsed && (
-                <div style={styles.stickerGrid}>
-                  {items.map((it) => (
-                    <StickerCard
-                      key={it.code}
-                      item={it}
-                      color={color}
-                      onAddDouble={() => onAddDouble(it.code, it.name)}
-                      onRemove={() => onRemove(it.code, it.name)}
-                    />
-                  ))}
+                <div>
+                  {teamOrder.map((team) => {
+                    const teamItems = byTeam[team];
+                    if (!teamItems || teamItems.length === 0) return null;
+                    const teamFull = TEAM_NAMES[team] || team;
+                    const flag = FLAGS[team] || "🏳️";
+                    return (
+                      <div key={team} style={styles.teamSubBlock}>
+                        <div style={styles.teamSubHeader}>
+                          <span style={{ fontSize: 16 }}>{flag}</span>
+                          <span>{teamFull}</span>
+                          <span style={styles.teamSubCode}>{team}</span>
+                        </div>
+                        <div style={styles.stickerSlotGrid}>
+                          {teamItems.map((it) => (
+                            <StickerSlot
+                              key={it.code}
+                              item={it}
+                              color={color}
+                              onAddDouble={() => onAddDouble(it.code, it.name)}
+                              onRemove={() => onRemove(it.code, it.name)}
+                              onQuickAdd={() => onQuickAdd(it.code, it.name)}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -500,27 +540,29 @@ function AlbumPage({ stickers, onBack, onAddDouble, onRemove, saveStatus }) {
   );
 }
 
-function StickerCard({ item, color, onAddDouble, onRemove }) {
-  const flag = FLAGS[item.team] || "🏳️";
-  const teamFull = TEAM_NAMES[item.team] || item.team;
+function StickerSlot({ item, color, onAddDouble, onRemove, onQuickAdd }) {
+  const { owned, num, name, dbl } = item;
+
+  if (!owned) {
+    return (
+      <button style={styles.slotEmpty} onClick={onQuickAdd} title="Marquer comme possédée">
+        <span style={styles.slotEmptyNum}>{num}</span>
+      </button>
+    );
+  }
+
   return (
-    <div style={{ ...styles.stickerCard, borderColor: color + "55" }}>
-      <div style={{ ...styles.stickerImg, background: `linear-gradient(160deg, ${color}33, #10130c)` }}>
-        <span style={styles.stickerFlag}>{flag}</span>
-        <span style={{ ...styles.stickerCode, color }}>{item.code}</span>
+    <div style={{ ...styles.slotFilled, borderColor: color, background: `linear-gradient(160deg, ${color}2a, #10130c)` }}>
+      <div style={styles.slotFilledTop}>
+        <span style={{ ...styles.slotFilledNum, color }}>{num}</span>
+        {dbl > 0 && <span style={styles.slotDblBadge}>+{dbl}</span>}
       </div>
-      <div style={styles.stickerBody}>
-        <div style={styles.stickerName}>{item.name}</div>
-        <div style={styles.stickerTeam}>{teamFull}</div>
-        {item.dbl > 0 && (
-          <div style={styles.stickerDblTag}>+{item.dbl} double{item.dbl > 1 ? "s" : ""}</div>
-        )}
-        <div style={styles.stickerActions}>
-          <button style={styles.miniBtnYellow} onClick={onAddDouble}>+ Double</button>
-          <button style={styles.miniBtnGhost} onClick={onRemove} aria-label="Supprimer">
-            <IconTrash />
-          </button>
-        </div>
+      <div style={styles.slotFilledName}>{name}</div>
+      <div style={styles.slotFilledActions}>
+        <button style={styles.slotMiniBtn} onClick={onAddDouble} title="Ajouter un double">+1</button>
+        <button style={styles.slotMiniBtnGhost} onClick={onRemove} aria-label="Supprimer" title="Retirer">
+          <IconTrash />
+        </button>
       </div>
     </div>
   );
@@ -541,15 +583,19 @@ function EmptyState({ title, desc }) {
    ============================================================ */
 
 function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
+  const [exporting, setExporting] = useState(false);
+
   const items = useMemo(() => {
     const list = Object.keys(stickers)
       .filter((code) => (stickers[code]?.dbl || 0) > 0)
       .map((code) => {
         const m = code.match(/^([A-Z]{3})(\d+)$/);
         const team = m ? m[1] : "FWC";
+        const num = m ? parseInt(m[2], 10) : 0;
         return {
           code,
           team,
+          num,
           name: PLAYER_DB[code] || code,
           dbl: stickers[code].dbl,
         };
@@ -560,6 +606,85 @@ function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
 
   const totalDoubles = items.reduce((s, i) => s + i.dbl, 0);
 
+  const handleExportPdf = useCallback(async () => {
+    if (items.length === 0 || exporting) return;
+    setExporting(true);
+    try {
+      await ensureJsPdfLoaded();
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ unit: "pt", format: "a4" });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const marginX = 40;
+      let y = 56;
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(18);
+      doc.text("Mes doubles — Album Panini FIFA World Cup 2026", marginX, y);
+      y += 20;
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10.5);
+      doc.setTextColor(90, 90, 90);
+      const dateStr = new Date().toLocaleDateString("fr-FR");
+      doc.text(`Généré le ${dateStr} — ${items.length} vignette${items.length > 1 ? "s" : ""} différente${items.length > 1 ? "s" : ""}, ${totalDoubles} exemplaire${totalDoubles > 1 ? "s" : ""} au total`, marginX, y);
+      y += 26;
+
+      // en-têtes de colonnes
+      const colNum = marginX;
+      const colTeam = marginX + 60;
+      const colName = marginX + 190;
+      const colQty = pageWidth - marginX - 50;
+
+      const drawHeader = () => {
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(10.5);
+        doc.setTextColor(20, 20, 20);
+        doc.text("N°", colNum, y);
+        doc.text("Équipe", colTeam, y);
+        doc.text("Joueur / Vignette", colName, y);
+        doc.text("Qté", colQty, y);
+        y += 8;
+        doc.setDrawColor(200, 200, 200);
+        doc.line(marginX, y, pageWidth - marginX, y);
+        y += 14;
+      };
+
+      drawHeader();
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10);
+      doc.setTextColor(30, 30, 30);
+
+      items.forEach((it, idx) => {
+        if (y > 780) {
+          doc.addPage();
+          y = 56;
+          drawHeader();
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(10);
+          doc.setTextColor(30, 30, 30);
+        }
+        const teamFull = TEAM_NAMES[it.team] || it.team;
+        doc.text(String(it.num), colNum, y);
+        doc.text(`${teamFull} (${it.team})`, colTeam, y, { maxWidth: 125 });
+        doc.text(it.name, colName, y, { maxWidth: pageWidth - marginX - 60 - colName });
+        doc.text(`x${it.dbl}`, colQty, y);
+        y += 18;
+
+        if (idx < items.length - 1) {
+          doc.setDrawColor(235, 235, 235);
+          doc.line(marginX, y - 12, pageWidth - marginX, y - 12);
+        }
+      });
+
+      doc.save("mes-doubles-panini-wc26.pdf");
+    } catch (err) {
+      console.error("Erreur export PDF :", err);
+      alert("Impossible de générer le PDF pour le moment. Réessaie dans quelques instants.");
+    } finally {
+      setExporting(false);
+    }
+  }, [items, totalDoubles, exporting]);
+
   return (
     <div style={styles.pageWrap}>
       <InnerHeader
@@ -567,6 +692,13 @@ function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
         subtitle={`${totalDoubles} vignette${totalDoubles > 1 ? "s" : ""} en double`}
         onBack={onBack}
         saveStatus={saveStatus}
+        right={
+          items.length > 0 ? (
+            <button style={styles.pdfBtn} onClick={handleExportPdf} disabled={exporting}>
+              {exporting ? "Génération…" : "📄 Export PDF"}
+            </button>
+          ) : null
+        }
       />
       <div style={styles.contentWrap}>
         {items.length === 0 && (
@@ -615,6 +747,22 @@ function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
       </div>
     </div>
   );
+}
+
+/* ---- chargement paresseux de jsPDF depuis un CDN (pas de dépendance npm) ---- */
+let jsPdfLoadingPromise = null;
+function ensureJsPdfLoaded() {
+  if (typeof window !== "undefined" && window.jspdf) return Promise.resolve();
+  if (jsPdfLoadingPromise) return jsPdfLoadingPromise;
+  jsPdfLoadingPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Échec du chargement de jsPDF"));
+    document.head.appendChild(script);
+  });
+  return jsPdfLoadingPromise;
 }
 
 /* ============================================================
@@ -931,6 +1079,17 @@ const styles = {
   },
   innerTitle: { color: "#fff", fontSize: 17, fontWeight: 800 },
   innerSubtitle: { color: "#8f8f7f", fontSize: 12.5, marginTop: 2 },
+  pdfBtn: {
+    background: "rgba(255,215,0,0.12)",
+    border: "1px solid rgba(255,215,0,0.4)",
+    color: YELLOW,
+    fontSize: 12,
+    fontWeight: 700,
+    padding: "8px 14px",
+    borderRadius: 999,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
   saveIndicator: {
     display: "flex",
     alignItems: "center",
@@ -992,6 +1151,106 @@ const styles = {
     letterSpacing: 0.5,
   },
   groupCount: { color: "#9c9c8c", fontSize: 12.5, flex: 1, textAlign: "left" },
+
+  teamSubBlock: { marginTop: 16, marginLeft: 4 },
+  teamSubHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    color: "#cfcfc0",
+    fontSize: 13,
+    fontWeight: 700,
+    marginBottom: 8,
+  },
+  teamSubCode: {
+    color: "#6b6b5e",
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: 0.5,
+    marginLeft: 2,
+  },
+  stickerSlotGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(84px, 1fr))",
+    gap: 8,
+  },
+  slotEmpty: {
+    aspectRatio: "3 / 4",
+    minHeight: 76,
+    background: "#12140d",
+    border: "1.5px dashed rgba(255,255,255,0.14)",
+    borderRadius: 12,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+  },
+  slotEmptyNum: {
+    color: "#454537",
+    fontSize: 15,
+    fontWeight: 800,
+  },
+  slotFilled: {
+    aspectRatio: "3 / 4",
+    minHeight: 76,
+    border: "1.5px solid",
+    borderRadius: 12,
+    padding: "6px 6px 5px",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "space-between",
+  },
+  slotFilledTop: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  slotFilledNum: { fontSize: 13, fontWeight: 800 },
+  slotDblBadge: {
+    background: YELLOW,
+    color: "#0a0a06",
+    fontSize: 9.5,
+    fontWeight: 800,
+    borderRadius: 999,
+    padding: "1px 6px",
+  },
+  slotFilledName: {
+    color: "#fff",
+    fontSize: 10.5,
+    fontWeight: 700,
+    lineHeight: 1.2,
+    overflow: "hidden",
+    display: "-webkit-box",
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: "vertical",
+  },
+  slotFilledActions: {
+    display: "flex",
+    gap: 4,
+  },
+  slotMiniBtn: {
+    flex: 1,
+    background: "rgba(255,215,0,0.14)",
+    color: YELLOW,
+    border: "none",
+    borderRadius: 7,
+    fontSize: 10,
+    fontWeight: 800,
+    padding: "3px 0",
+    cursor: "pointer",
+  },
+  slotMiniBtnGhost: {
+    width: 20,
+    height: 20,
+    borderRadius: 6,
+    border: "none",
+    background: "rgba(255,107,107,0.12)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    flexShrink: 0,
+  },
 
   stickerGrid: {
     display: "grid",
