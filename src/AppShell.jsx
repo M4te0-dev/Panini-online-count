@@ -584,30 +584,68 @@ function EmptyState({ title, desc }) {
 
 function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
   const [exporting, setExporting] = useState(false);
+  const [sortMode, setSortMode] = useState("qty"); // qty | group
 
-  const items = useMemo(() => {
-    const list = Object.keys(stickers)
+  const orderedGroupKeys = [...Object.keys(GROUPS), "★"];
+
+  const rawItems = useMemo(() => {
+    return Object.keys(stickers)
       .filter((code) => (stickers[code]?.dbl || 0) > 0)
       .map((code) => {
         const m = code.match(/^([A-Z]{3})(\d+)$/);
         const team = m ? m[1] : "FWC";
         const num = m ? parseInt(m[2], 10) : 0;
+        const group = TEAM_TO_GROUP[team] || "★";
         return {
           code,
           team,
           num,
+          group,
           name: PLAYER_DB[code] || code,
           dbl: stickers[code].dbl,
         };
       });
-    list.sort((a, b) => b.dbl - a.dbl);
-    return list;
   }, [stickers]);
 
-  const totalDoubles = items.reduce((s, i) => s + i.dbl, 0);
+  // liste triée selon le mode choisi (pour le PDF et, en mode "qty", pour l'affichage)
+  const sortedItems = useMemo(() => {
+    const list = [...rawItems];
+    if (sortMode === "qty") {
+      list.sort((a, b) => b.dbl - a.dbl);
+    } else {
+      // par groupe (ordre officiel) puis équipe (ordre officiel) puis numéro
+      const groupIndex = Object.fromEntries(orderedGroupKeys.map((g, i) => [g, i]));
+      const teamIndex = {};
+      orderedGroupKeys.forEach((g) => {
+        const teams = g === "★" ? ["FWC"] : GROUPS[g];
+        teams.forEach((t, i) => {
+          teamIndex[t] = i;
+        });
+      });
+      list.sort((a, b) => {
+        const gi = groupIndex[a.group] - groupIndex[b.group];
+        if (gi !== 0) return gi;
+        const ti = (teamIndex[a.team] ?? 0) - (teamIndex[b.team] ?? 0);
+        if (ti !== 0) return ti;
+        return a.num - b.num;
+      });
+    }
+    return list;
+  }, [rawItems, sortMode]);
+
+  // regroupement pour l'affichage en mode "group"
+  const groupedForDisplay = useMemo(() => {
+    if (sortMode !== "group") return null;
+    const byGroup = {};
+    orderedGroupKeys.forEach((g) => (byGroup[g] = []));
+    sortedItems.forEach((it) => byGroup[it.group].push(it));
+    return orderedGroupKeys.filter((g) => byGroup[g].length > 0).map((g) => ({ group: g, items: byGroup[g] }));
+  }, [sortedItems, sortMode]);
+
+  const totalDoubles = rawItems.reduce((s, i) => s + i.dbl, 0);
 
   const handleExportPdf = useCallback(async () => {
-    if (items.length === 0 || exporting) return;
+    if (sortedItems.length === 0 || exporting) return;
     setExporting(true);
     try {
       await ensureJsPdfLoaded();
@@ -626,10 +664,15 @@ function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
       doc.setFontSize(10.5);
       doc.setTextColor(90, 90, 90);
       const dateStr = new Date().toLocaleDateString("fr-FR");
-      doc.text(`Généré le ${dateStr} — ${items.length} vignette${items.length > 1 ? "s" : ""} différente${items.length > 1 ? "s" : ""}, ${totalDoubles} exemplaire${totalDoubles > 1 ? "s" : ""} au total`, marginX, y);
+      const sortLabel = sortMode === "qty" ? "triés par nombre d'exemplaires" : "triés par groupe et par pays";
+      doc.text(
+        `Généré le ${dateStr} — ${sortedItems.length} vignette${sortedItems.length > 1 ? "s" : ""} différente${sortedItems.length > 1 ? "s" : ""}, ${totalDoubles} exemplaire${totalDoubles > 1 ? "s" : ""} au total (${sortLabel})`,
+        marginX,
+        y,
+        { maxWidth: pageWidth - marginX * 2 }
+      );
       y += 26;
 
-      // en-têtes de colonnes
       const colNum = marginX;
       const colTeam = marginX + 60;
       const colName = marginX + 190;
@@ -649,12 +692,23 @@ function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
         y += 14;
       };
 
-      drawHeader();
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(10);
-      doc.setTextColor(30, 30, 30);
+      const drawGroupTitle = (label) => {
+        if (y > 760) {
+          doc.addPage();
+          y = 56;
+        }
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(12.5);
+        doc.setTextColor(10, 10, 10);
+        doc.text(label, marginX, y);
+        y += 18;
+        drawHeader();
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(10);
+        doc.setTextColor(30, 30, 30);
+      };
 
-      items.forEach((it, idx) => {
+      const drawRow = (it, isLast) => {
         if (y > 780) {
           doc.addPage();
           y = 56;
@@ -669,12 +723,26 @@ function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
         doc.text(it.name, colName, y, { maxWidth: pageWidth - marginX - 60 - colName });
         doc.text(`x${it.dbl}`, colQty, y);
         y += 18;
-
-        if (idx < items.length - 1) {
+        if (!isLast) {
           doc.setDrawColor(235, 235, 235);
           doc.line(marginX, y - 12, pageWidth - marginX, y - 12);
         }
-      });
+      };
+
+      if (sortMode === "group") {
+        groupedForDisplay.forEach(({ group, items }) => {
+          const label = group === "★" ? "Vignettes spéciales FIFA" : `Groupe ${group}`;
+          drawGroupTitle(label);
+          items.forEach((it, idx) => drawRow(it, idx === items.length - 1));
+          y += 10;
+        });
+      } else {
+        drawHeader();
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(10);
+        doc.setTextColor(30, 30, 30);
+        sortedItems.forEach((it, idx) => drawRow(it, idx === sortedItems.length - 1));
+      }
 
       doc.save("mes-doubles-panini-wc26.pdf");
     } catch (err) {
@@ -683,7 +751,34 @@ function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
     } finally {
       setExporting(false);
     }
-  }, [items, totalDoubles, exporting]);
+  }, [sortedItems, groupedForDisplay, sortMode, totalDoubles, exporting]);
+
+  const renderCard = (it) => {
+    const color = GROUP_COLORS[it.group] || "#FFD700";
+    const flag = FLAGS[it.team] || "🏳️";
+    const teamFull = TEAM_NAMES[it.team] || it.team;
+    return (
+      <div key={it.code} style={{ ...styles.stickerCard, borderColor: color + "55" }}>
+        <div style={{ ...styles.stickerImg, background: `linear-gradient(160deg, ${color}33, #10130c)` }}>
+          <span style={styles.stickerFlag}>{flag}</span>
+          <span style={{ ...styles.stickerCode, color }}>{it.code}</span>
+        </div>
+        <div style={styles.stickerBody}>
+          <div style={styles.stickerName}>{it.name}</div>
+          <div style={styles.stickerTeam}>{teamFull}</div>
+          <div style={styles.qtyRow}>
+            <button style={styles.qtyBtn} onClick={() => onSetQty(it.code, it.dbl - 1)} aria-label="Retirer un double">
+              −
+            </button>
+            <span style={styles.qtyValue}>{it.dbl}</span>
+            <button style={styles.qtyBtn} onClick={() => onSetQty(it.code, it.dbl + 1)} aria-label="Ajouter un double">
+              +
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div style={styles.pageWrap}>
@@ -693,7 +788,7 @@ function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
         onBack={onBack}
         saveStatus={saveStatus}
         right={
-          items.length > 0 ? (
+          sortedItems.length > 0 ? (
             <button style={styles.pdfBtn} onClick={handleExportPdf} disabled={exporting}>
               {exporting ? "Génération…" : "📄 Export PDF"}
             </button>
@@ -701,49 +796,52 @@ function DoublesPage({ stickers, onBack, onSetQty, saveStatus }) {
         }
       />
       <div style={styles.contentWrap}>
-        {items.length === 0 && (
+        {sortedItems.length === 0 && (
           <EmptyState
             title="Aucun double pour l'instant"
             desc="Les vignettes en plusieurs exemplaires apparaîtront ici."
           />
         )}
-        <div style={styles.stickerGrid}>
-          {items.map((it) => {
-            const group = TEAM_TO_GROUP[it.team] || "★";
+
+        {sortedItems.length > 0 && (
+          <div style={styles.sortRow}>
+            <span style={styles.sortLabel}>Trier par :</span>
+            <button
+              style={{ ...styles.sortBtn, ...(sortMode === "qty" ? styles.sortBtnActive : {}) }}
+              onClick={() => setSortMode("qty")}
+            >
+              Nombre d'exemplaires
+            </button>
+            <button
+              style={{ ...styles.sortBtn, ...(sortMode === "group" ? styles.sortBtnActive : {}) }}
+              onClick={() => setSortMode("group")}
+            >
+              Groupe / Pays
+            </button>
+          </div>
+        )}
+
+        {sortMode === "qty" && (
+          <div style={styles.stickerGrid}>{sortedItems.map(renderCard)}</div>
+        )}
+
+        {sortMode === "group" &&
+          groupedForDisplay.map(({ group, items }) => {
             const color = GROUP_COLORS[group] || "#FFD700";
-            const flag = FLAGS[it.team] || "🏳️";
-            const teamFull = TEAM_NAMES[it.team] || it.team;
             return (
-              <div key={it.code} style={{ ...styles.stickerCard, borderColor: color + "55" }}>
-                <div style={{ ...styles.stickerImg, background: `linear-gradient(160deg, ${color}33, #10130c)` }}>
-                  <span style={styles.stickerFlag}>{flag}</span>
-                  <span style={{ ...styles.stickerCode, color }}>{it.code}</span>
+              <div key={group} style={styles.groupBlock}>
+                <div style={{ ...styles.groupHeader, borderColor: color, cursor: "default" }}>
+                  <span style={{ ...styles.groupBadge, background: color }}>
+                    {group === "★" ? "★ SPÉCIALES FIFA" : `GROUPE ${group}`}
+                  </span>
+                  <span style={styles.groupCount}>
+                    {items.length} vignette{items.length > 1 ? "s" : ""}
+                  </span>
                 </div>
-                <div style={styles.stickerBody}>
-                  <div style={styles.stickerName}>{it.name}</div>
-                  <div style={styles.stickerTeam}>{teamFull}</div>
-                  <div style={styles.qtyRow}>
-                    <button
-                      style={styles.qtyBtn}
-                      onClick={() => onSetQty(it.code, it.dbl - 1)}
-                      aria-label="Retirer un double"
-                    >
-                      −
-                    </button>
-                    <span style={styles.qtyValue}>{it.dbl}</span>
-                    <button
-                      style={styles.qtyBtn}
-                      onClick={() => onSetQty(it.code, it.dbl + 1)}
-                      aria-label="Ajouter un double"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
+                <div style={{ ...styles.stickerGrid, marginTop: 14 }}>{items.map(renderCard)}</div>
               </div>
             );
           })}
-        </div>
       </div>
     </div>
   );
@@ -1109,6 +1207,35 @@ const styles = {
     maxWidth: 1000,
     margin: "0 auto",
     padding: "22px 18px 70px",
+  },
+
+  sortRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    marginBottom: 22,
+  },
+  sortLabel: {
+    color: "#9c9c8c",
+    fontSize: 12.5,
+    fontWeight: 700,
+    marginRight: 4,
+  },
+  sortBtn: {
+    background: "rgba(255,255,255,0.05)",
+    border: "1px solid rgba(255,255,255,0.1)",
+    color: "#cfcfc0",
+    fontSize: 12.5,
+    fontWeight: 700,
+    padding: "8px 16px",
+    borderRadius: 999,
+    cursor: "pointer",
+  },
+  sortBtnActive: {
+    background: YELLOW,
+    color: "#0a0a06",
+    border: "1px solid " + YELLOW,
   },
 
   searchBar: {
